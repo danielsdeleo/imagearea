@@ -1,0 +1,85 @@
+#!/usr/bin/env ruby
+
+require 'pp'
+
+def env_path
+  ENV["PATH"]
+end
+
+def valid_executable?(filename)
+  return false unless File.executable?(filename) && !File.directory?(filename)
+  true
+end
+
+def where(*cmds)
+  paths = env_path.split(File::PATH_SEPARATOR)
+  cmds.each do |cmd|
+    paths.each do |path|
+      filename = File.join(path, cmd)
+      return filename if valid_executable?(filename)
+    end
+  end
+  return nil
+end
+
+if where("convert").nil?
+  puts(<<-INSTALL)
+/!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ 
+imagemagick is not installed or not in your PATH.
+On MacOS you can `brew install imagemagick`
+/!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ /!\ 
+INSTALL
+  exit 1
+end
+
+source_image = ARGV[0]
+reduced_color_image = source_image + "_reduced_color.gif"
+
+pp source_image: source_image
+# Reduce the colors. This gets rid of most (but not all) of the noise from
+# in-between colors caused by antialiasing.
+color_reducer_cmd = ["convert", source_image, "-dither", "None", "-colors", "64", "+antialias", reduced_color_image]
+
+pid = Process.spawn(*color_reducer_cmd)
+_, status = Process.waitpid2(pid)
+
+if !status.success?
+  puts "imagemagick command failed"
+  puts "the command run was:"
+  puts "  #{color_reducer_cmd.join(' ')}"
+  exit 1
+end
+
+# convert ./curtain_20color.gif -define histogram:unique-colors=true -format %c histogram:info:- 
+# im.lines.each { |l| md = l.match(/\s+(\d+)\:\s+\((.+)\)\s+#/); puts "#{md[1]},#{md[2]}" }
+
+histogram_cmd = [ "convert", reduced_color_image, "-define", "histogram:unique-colors=true", "-format", "%c", "histogram:info:-" ]
+
+reader, writer = IO.pipe()
+
+pid = Process.spawn(*histogram_cmd, out: writer)
+
+# Have to close the writer on our side or else the reader can never get to EOF
+writer.close()
+
+histogram_output = reader.read()
+
+_, status = Process.waitpid2(pid)
+
+if !status.success?
+  puts "imagemagick command failed"
+  puts "the command run was:"
+  puts "  #{histogram_cmd.join(' ')}"
+  exit 1
+end
+
+
+histogram_output.lines.each do |l|
+  # match a line like this
+  #  pixel_count: ( rrr, ggg, bbb ) #hexcolor srgb( r, g, b)
+  #  e.g.,
+  #  21608: (143,200, 55) #8FC837 srgb(143,200,55)
+  md = l.match(/\s+(\d+)\:\s+\((.+)\)\s+#/)
+  # output pixel count rgb in tab separated value
+  puts "#{md[1]}\t#{md[2]}"
+end
